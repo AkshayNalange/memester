@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Meme Str</title>
+<title>MemeScroll</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -434,23 +434,27 @@ function dismissHint() {
   }
 }
 
-// ── DOWNLOAD ───────────────────────────────────────
-// CORS proxies tried in order until one works
+// ── DOWNLOAD & SHARE ───────────────────────────────
 const PROXIES = [
   u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
   u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-  u => `https://cors-anywhere.herokuapp.com/${u}`,
 ];
 
-async function fetchViaProxy(url) {
-  for (const proxyFn of PROXIES) {
+const isIOS = /iP(hone|ad|od)/i.test(navigator.userAgent);
+
+function getExt(url) {
+  const m = url.split('?')[0].match(/\.(jpg|jpeg|png|gif|webp)$/i);
+  return m ? m[1].toLowerCase() : 'jpg';
+}
+
+async function fetchBlob(url) {
+  for (const fn of PROXIES) {
     try {
-      const res = await fetch(proxyFn(url), { signal: AbortSignal.timeout(10000) });
-      if (res.ok) {
-        const blob = await res.blob();
-        if (blob.size > 500) return blob; // real image, not error page
-      }
-    } catch { /* try next proxy */ }
+      const res = await fetch(fn(url), { signal: AbortSignal.timeout(12000) });
+      if (!res.ok) continue;
+      const blob = await res.blob();
+      if (blob.size > 800 && blob.type.startsWith('image/')) return blob;
+    } catch { /* next proxy */ }
   }
   return null;
 }
@@ -458,69 +462,78 @@ async function fetchViaProxy(url) {
 async function downloadMeme() {
   const url = currentUrl;
   if (!url) return;
-
   const btn = document.getElementById('btn-download');
   btn.style.pointerEvents = 'none';
-  showToast('⬇️ Downloading…');
-
+  showToast('⬇️ Fetching…');
   try {
-    const blob = await fetchViaProxy(url);
+    const blob = await fetchBlob(url);
+    if (!blob) { showToast('❌ Failed to fetch image', 'err'); return; }
 
-    if (blob) {
-      const ext  = (url.split('?')[0].split('.').pop().split('#')[0] || 'jpg').toLowerCase();
-      const safe = ['jpg','jpeg','png','gif','webp'].includes(ext) ? ext : 'jpg';
-      const a    = document.createElement('a');
-      a.href     = URL.createObjectURL(blob);
-      a.download = `meme_${Date.now()}.${safe}`;
+    const blobUrl = URL.createObjectURL(blob);
+
+    if (isIOS) {
+      // iOS Safari ignores <a download> — open blob URL in new tab.
+      // User sees the full image and can tap & hold → "Save to Photos"
+      const win = window.open(blobUrl, '_blank');
+      if (!win) {
+        // Pop-up blocked — show inline tip
+        showToast('📸 Tap & hold image → Save to Photos', 'ok');
+      } else {
+        showToast('📸 Tap & hold → Save to Photos', 'ok');
+      }
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+    } else {
+      // Android / Desktop: standard anchor download
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = `memestr_${Date.now()}.${getExt(url)}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 8000);
       btn.classList.add('ok');
       setTimeout(() => btn.classList.remove('ok'), 1800);
-      showToast('✅ Saved to device!', 'ok');
-    } else {
-      // All proxies failed — last resort: force download via anchor with no target
-      showToast('⚠️ Trying direct save…');
-      const a    = document.createElement('a');
-      a.href     = url;
-      a.download = `meme_${Date.now()}.jpg`;
-      // No _blank — let browser handle as download
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      showToast('💾 Check your downloads!', 'ok');
+      showToast('✅ Saved!', 'ok');
     }
   } finally {
     btn.style.pointerEvents = '';
   }
 }
 
-// ── SHARE ──────────────────────────────────────────
 async function shareMeme() {
   const url = currentUrl;
   if (!url) return;
+
   if (navigator.share) {
+    showToast('🔄 Preparing…');
     try {
-      // Try file share first (mobile)
-      const res  = await fetch(url, { mode: 'cors' });
-      const blob = await res.blob();
-      const ext  = (url.split('?')[0].split('.').pop() || 'jpg').toLowerCase();
-      const file = new File([blob], `meme.${ext}`, { type: blob.type });
-      if (navigator.canShare?.({ files: [file] })) {
-        await navigator.share({ files: [file], title: 'Found this meme 😂' });
-        return;
+      // Fetch image via proxy so we can share the actual file (not just a URL)
+      const blob = await fetchBlob(url);
+      if (blob) {
+        const file = new File([blob], `memestr.${getExt(url)}`, { type: blob.type });
+        if (navigator.canShare?.({ files: [file] })) {
+          await navigator.share({ files: [file], title: 'Found this meme 😂' });
+          showToast('');
+          return;
+        }
       }
-      await navigator.share({ title: 'Check this meme!', url });
+      // File share not supported — share URL text
+      await navigator.share({ title: 'Check this meme 😂', url });
+      showToast('');
       return;
-    } catch(e) { if (e.name === 'AbortError') return; }
+    } catch(e) {
+      if (e.name === 'AbortError') { showToast(''); return; }
+      // Fall through to clipboard
+    }
   }
-  // Desktop fallback
+
+  // Desktop: copy URL to clipboard
   try {
     await navigator.clipboard.writeText(url);
     showToast('🔗 Link copied!', 'ok');
-  } catch { showToast('❌ Copy failed', 'err'); }
+  } catch {
+    showToast('❌ Copy failed', 'err');
+  }
 }
 
 // ── TOAST ──────────────────────────────────────────
